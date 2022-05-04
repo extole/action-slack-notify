@@ -22,7 +22,7 @@ jobs:
         uses: docker/login-action@v1
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
+          username: 'extole-github-actions'
           password: ${{ secrets.EXTOLE_GITHUB_PAT }}
 
       - name: Extract metadata (tags, labels) for Docker
