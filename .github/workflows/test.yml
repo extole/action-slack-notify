@@ -1,0 +1,55 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the payload
+        run: ./slack-notify-test
+
+      - name: Start a webhook that records what it receives
+        run: |
+          cat > "$RUNNER_TEMP/webhook.py" <<'EOF'
+          import http.server, os, sys
+          class Webhook(http.server.BaseHTTPRequestHandler):
+              def do_POST(self):
+                  body = self.rfile.read(int(self.headers["Content-Length"]))
+                  open(os.environ["RECEIVED"], "wb").write(body)
+                  self.send_response(200)
+                  self.end_headers()
+                  self.wfile.write(b"ok")
+          http.server.HTTPServer(("127.0.0.1", 8765), Webhook).serve_forever()
+          EOF
+          RECEIVED="$RUNNER_TEMP/received" nohup python3 "$RUNNER_TEMP/webhook.py" > "$RUNNER_TEMP/webhook.log" 2>&1 &
+          for _ in $(seq 20); do curl -s -o /dev/null http://127.0.0.1:8765 && exit 0; sleep 0.5; done
+          exit 1
+
+      - name: Call the action as a workflow does
+        uses: ./
+        env:
+          SLACK_WEBHOOK: http://127.0.0.1:8765/hook
+          SLACK_CHANNEL: '#production-issues'
+          SLACK_COLOR: danger
+          SLACK_TITLE: 'test: a check failed'
+          SLACK_MESSAGE: 'line one, "quoted"'
+          SLACK_MSG_AUTHOR: ' '
+
+      - name: Check what the webhook received
+        run: |
+          received="$RUNNER_TEMP/received"
+          jq . "$received"
+          test "$(jq -r .channel "$received")" = '#production-issues'
+          test "$(jq -r '.attachments[0].color' "$received")" = danger
+          test "$(jq -r '.attachments[0].fields[2].title' "$received")" = 'test: a check failed'
+          test "$(jq -r '.attachments[0].fields[2].value' "$received")" = 'line one, "quoted"'
+          test "$(jq '.attachments[0] | has("author_name")' "$received")" = false

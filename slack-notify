@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+
+set -eu
+set -o pipefail
+
+: "${SLACK_WEBHOOK:?SLACK_WEBHOOK is required}"
+: "${SLACK_TITLE:?SLACK_TITLE is required}"
+: "${SLACK_MESSAGE:?SLACK_MESSAGE is required}"
+: "${GITHUB_SERVER_URL:?GITHUB_SERVER_URL is required}"
+: "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+: "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
+: "${GITHUB_WORKFLOW:?GITHUB_WORKFLOW is required}"
+: "${GITHUB_EVENT_NAME:?GITHUB_EVENT_NAME is required}"
+: "${GITHUB_ACTOR:?GITHUB_ACTOR is required}"
+
+case "${SLACK_COLOR:-}" in
+    ""|success) color="good" ;;
+    failure) color="danger" ;;
+    cancelled) color="#808080" ;;
+    *) color="$SLACK_COLOR" ;;
+esac
+
+payload=$(jq -n \
+    --arg channel "${SLACK_CHANNEL:-}" \
+    --arg username "${SLACK_USERNAME:-$GITHUB_WORKFLOW}" \
+    --arg icon "${SLACK_ICON:-https://avatars.githubusercontent.com/u/331062?s=96&v=4}" \
+    --arg link_names "${SLACK_LINK_NAMES:-true}" \
+    --arg title "$SLACK_TITLE" \
+    --arg message "$SLACK_MESSAGE" \
+    --arg color "$color" \
+    --arg author "${SLACK_MSG_AUTHOR:-$GITHUB_ACTOR}" \
+    --arg footer "${SLACK_FOOTER:-<https://github.com/$GITHUB_REPOSITORY|$GITHUB_REPOSITORY>}" \
+    --arg workflow "$GITHUB_WORKFLOW" \
+    --arg event "$GITHUB_EVENT_NAME" \
+    --arg server_url "$GITHUB_SERVER_URL" \
+    --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+    '{
+        username: $username,
+        icon_url: $icon,
+        link_names: $link_names,
+        unfurl_links: false,
+        attachments: [({
+            fallback: $title,
+            color: $color,
+            footer: $footer,
+            fields: [
+                {title: "Event", value: $event, short: true},
+                {title: "Actions URL", value: "<\($run_url)|\($workflow)>", short: true},
+                {title: $title, value: $message, short: false}
+            ]
+        } + if ($author | test("^\\s*$")) then {} else {
+            author_name: $author,
+            author_link: "\($server_url)/\($author)",
+            author_icon: "\($server_url)/\($author).png?size=32"
+        } end)]
+    } + if $channel == "" then {} else {channel: $channel} end')
+
+curl -fsS -X POST "$SLACK_WEBHOOK" -d "$payload" 1>/dev/null

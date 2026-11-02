@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+failures=0
+
+expect() {
+    local name="$1" expected="$2" actual="$3"
+    if [ "$expected" = "$actual" ]; then
+        echo "ok   $name"
+    else
+        echo "FAIL $name: expected '$expected', got '$actual'" 1>&2
+        failures=$((failures + 1))
+    fi
+}
+
+fixtures="$(mktemp -d)"
+trap 'rm -rf "$fixtures"' EXIT
+
+cat > "$fixtures/curl" <<'EOF'
+#!/usr/bin/env bash
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -d) echo "$2" > "$CURL_POSTED" ; shift ;;
+        -X) echo "$2" > "$CURL_POSTED.method" ; shift ;;
+        *) echo "$1" > "$CURL_POSTED.url" ;;
+    esac
+    shift
+done
+exit "${CURL_EXIT:-0}"
+EOF
+chmod +x "$fixtures/curl"
+
+export PATH="$fixtures:$PATH"
+export CURL_POSTED="$fixtures/posted"
+export SLACK_WEBHOOK="https://hooks.slack.test/services/T0/B0/x"
+export GITHUB_SERVER_URL="https://github.com"
+export GITHUB_REPOSITORY="extole/tech"
+export GITHUB_RUN_ID="42"
+export GITHUB_WORKFLOW="destroy-lo"
+export GITHUB_EVENT_NAME="workflow_dispatch"
+export GITHUB_ACTOR="octocat"
+
+function post {
+    rm -f "$CURL_POSTED"
+    (env SLACK_TITLE="${SLACK_TITLE-t}" SLACK_MESSAGE="${SLACK_MESSAGE-m}" "$@" "$source_directory/slack-notify") 2>&1 || echo "exit $?"
+}
+
+function posted {
+    jq -c "$1" "$CURL_POSTED"
+}
+
+SLACK_TITLE="Environment destroyed" SLACK_MESSAGE='line one
+"quoted" line two' post SLACK_CHANNEL="#extole_alerts" SLACK_COLOR=success > /dev/null
+expect "posts to the webhook" "POST $SLACK_WEBHOOK" "$(cat "$CURL_POSTED.method") $(cat "$CURL_POSTED.url")"
+expect "names the channel, the workflow and the icon" \
+    '["#extole_alerts","destroy-lo","https://avatars.githubusercontent.com/u/331062?s=96&v=4","true",false]' \
+    "$(posted '[.channel, .username, .icon_url, .link_names, .unfurl_links]')"
+expect "lists the event, the run link, then the message" \
+    '[{"title":"Event","value":"workflow_dispatch","short":true},{"title":"Actions URL","value":"<https://github.com/extole/tech/actions/runs/42|destroy-lo>","short":true},{"title":"Environment destroyed","value":"line one\n\"quoted\" line two","short":false}]' \
+    "$(posted '.attachments[0].fields')"
+expect "names the actor as the author" \
+    '["octocat","https://github.com/octocat","https://github.com/octocat.png?size=32"]' \
+    "$(posted '.attachments[0] | [.author_name, .author_link, .author_icon]')"
+expect "links the repository in the footer" '"<https://github.com/extole/tech|extole/tech>"' "$(posted '.attachments[0].footer')"
+
+post > /dev/null
+expect "leaves the channel to the webhook when none is given" 'false' "$(posted 'has("channel")')"
+
+post SLACK_USERNAME=monitor SLACK_ICON=https://example.test/i.png SLACK_FOOTER=foot SLACK_LINK_NAMES=false > /dev/null
+expect "takes the username, icon, footer and link names it is given" \
+    '["monitor","https://example.test/i.png","foot","false"]' \
+    "$(posted '[.username, .icon_url, .attachments[0].footer, .link_names]')"
+
+post SLACK_MSG_AUTHOR=' ' > /dev/null
+expect "omits the author when SLACK_MSG_AUTHOR is blank" 'false' "$(posted '.attachments[0] | has("author_name")')"
+
+post SLACK_MSG_AUTHOR=someone > /dev/null
+expect "names SLACK_MSG_AUTHOR as the author" '"someone"' "$(posted '.attachments[0].author_name')"
+
+for case in "success good" "failure danger" "cancelled #808080" "warning warning" "danger danger" "#ECB22E #ECB22E"; do
+    read -r given expected <<< "$case"
+    post SLACK_COLOR="$given" > /dev/null
+    expect "colors $given as $expected" "\"$expected\"" "$(posted '.attachments[0].color')"
+done
+
+post SLACK_COLOR= > /dev/null
+expect "colors an empty color as success" '"good"' "$(posted '.attachments[0].color')"
+
+post > /dev/null
+expect "colors a missing color as success" '"good"' "$(posted '.attachments[0].color')"
+
+expect "stops without a webhook" "exit 1" "$(post SLACK_WEBHOOK= | tail -1)"
+expect "stops without a title" "exit 1" "$(SLACK_TITLE='' post | tail -1)"
+expect "stops without a message" "exit 1" "$(SLACK_MESSAGE='' post | tail -1)"
+expect "fails when Slack refuses the message" "exit 22" "$(post CURL_EXIT=22 | tail -1)"
+
+if [ "$failures" -gt 0 ]; then
+    echo "$failures failed" 1>&2
+    exit 1
+fi
+echo "all passed"

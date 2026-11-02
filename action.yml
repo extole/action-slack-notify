@@ -1,9 +1,11 @@
 name: 'Slack Notify'
-description: 'This action will send a notification to Slack'
-author: 'rtCamp'
+description: 'Posts a GitHub Actions notification to a Slack incoming webhook. Needs bash, jq and curl, and no Docker.'
 runs:
-  using: 'docker'
-  image: 'docker://ghcr.io/extole/action-slack-notify:master'
+  using: 'composite'
+  steps:
+    - name: Post to Slack
+      run: '"$GITHUB_ACTION_PATH/slack-notify"'
+      shell: bash
 branding:
   icon: 'bell'
   color: 'yellow'
